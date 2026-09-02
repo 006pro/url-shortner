@@ -1,7 +1,11 @@
+import logging
+
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger("app.errors")
 
 
 class AppError(Exception):
@@ -78,4 +82,17 @@ def register_exception_handlers(app: FastAPI) -> None:
                     {"errors": exc.errors()},
                 )
             ),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception):
+        # Catch-all so a genuine bug or infra failure (e.g. a DB outage) still
+        # returns the same {"error": {...}} shape as every other endpoint,
+        # instead of falling through to FastAPI's default {"detail": ...}
+        # response. The real exception is logged server-side but never sent
+        # to the client, to avoid leaking internals.
+        logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=_error_body("internal_error", "An unexpected error occurred"),
         )

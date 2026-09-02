@@ -7,9 +7,23 @@ from app.timeutils import to_utc_naive, utcnow
 
 ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,32}$")
 
+# 2048 matches the practical length ceiling most browsers and other URL
+# shorteners settle on (historically Internet Explorer's own limit, and still
+# a sane upper bound today). The `links.target_url` column is MySQL TEXT,
+# which holds up to 65,535 bytes, so this is purely an application-level
+# sanity limit -- it exists to reject obvious garbage/abuse before it's ever
+# stored or sent through URL parsing and a DNS lookup, not a storage
+# constraint.
+MAX_TARGET_URL_LENGTH = 2048
+
 
 class LinkCreateRequest(BaseModel):
-    target_url: str = Field(..., description="The URL to redirect to.")
+    target_url: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_TARGET_URL_LENGTH,
+        description="The URL to redirect to.",
+    )
     custom_alias: str | None = Field(
         default=None, description="Optional custom short code, 3-32 chars: letters, digits, - and _."
     )
