@@ -44,12 +44,13 @@ overriding the earlier answer:
 > credentials?" — options: give the assistant the root password directly, or
 > write a `setup.sql` for the user to run themselves.
 
-**User chose to share the root password directly** (`root`/`root`, local
-dev machine only). The assistant used it once, non-interactively, to create
-a dedicated `url_shortener_app` MySQL user scoped to only
+**The user chose to provide the local MySQL root credential temporarily for
+development.** The credential was used only once, non-interactively, to
+create a dedicated `url_shortener_app` MySQL user scoped to only
 `url_shortener`/`url_shortener_test`, rather than having the app itself run
-as root — the root password was not stored anywhere in the project (`.env`
-holds only the generated app-user credentials).
+as root. It was not stored anywhere in the project — `.env` holds only the
+generated app-user credentials, and the root credential itself never
+appears in this repository or in this document.
 
 ## 3. Implementation
 
@@ -131,8 +132,10 @@ to match what MySQL actually does, and every place that previously called
 rate limiting, the stats router, the request schema's expiry validator) was
 updated to go through `timeutils.utcnow()` instead, so there is exactly one
 place that convention is defined. Confirmed fixed by re-running the full
-suite (31 passed) and by re-verifying live against the running server with
-a real short-lived `expires_at` link.
+suite (31 passed at this point in the project — an intermediate count; see
+[section 7](#7-follow-up-gap-audit-against-a-re-stated-spec-then-four-fixes)
+for how the suite later grew to its final 36) and by re-verifying live
+against the running server with a real short-lived `expires_at` link.
 
 ## 5. Minor corrections made during review of the assistant's own code
 
@@ -168,39 +171,29 @@ reproduced the failure directly (`pip install --dry-run pydantic-core==2.23.4`
 against a fresh 3.14.7 venv) and confirmed the actual cause: PyPI only has a
 source `.tar.gz` for that release, no `cp314` wheel, so pip has to compile
 the Rust extension from source — which fails on a machine without a Rust
-toolchain, matching the user's report exactly. The assistant also noticed
-the project's real `.venv` already had a mix of newer packages installed
-(e.g. `fastapi==0.141.1`) that didn't match the old pins at all, and was
-*missing* `cryptography` and the `uvicorn[standard]` extras entirely —
-evidence that someone had patched the environment by hand at some point
-without updating `requirements.txt`, which meant the existing `.venv`
-couldn't be trusted as a clean signal and needed independent verification.
+toolchain, matching the user's report exactly.
 
-**Fix:** installed the direct dependencies into a disposable venv with
-`pip install --only-binary=:all:` (a hard requirement that no source build
-happen at all) and only lower-bound constraints, letting pip's resolver
-pick the latest versions that actually ship `cp314` wheels. Every package
-resolved to a wheel, including `cryptography` (as `cryptography-50.0.1`, a
-`cp311-abi3` stable-ABI wheel — abi3 wheels work unchanged across Python
-minor versions, which is why a library like `cryptography` can support a
-brand-new Python release before doing a from-scratch native rebuild).
-`requirements.txt` was rewritten to those exact resolved versions,
-including adding `cryptography` (needed by PyMySQL for MySQL 8's default
-`caching_sha2_password` auth) and the `[standard]` extra on `uvicorn`
-(`--reload` depends on `watchfiles`, which was silently missing before) —
-both had been dropped in whatever ad-hoc fix produced the stale `.venv`.
+**Fix:** resolved a new, compatible dependency set in a disposable venv
+using `pip install --only-binary=:all:` (a hard requirement that no package
+build from source at all) with only lower-bound version constraints, letting
+pip's resolver pick the latest versions that actually ship `cp314` wheels.
+Every package resolved to a prebuilt wheel. `requirements.txt` was rewritten
+to those exact resolved versions, including adding `cryptography` (needed by
+PyMySQL for MySQL 8's default authentication) and the `[standard]` extra on
+`uvicorn` (needed for `--reload`), both of which turned out to be missing
+from the project's actual `.venv` as well.
 
-**Verification:** ran `pip install -r requirements.txt` against the
-project's actual `.venv` (not just the throwaway one) and confirmed it only
-needed to add the previously-missing `cryptography`/extras with zero source
-builds; ran `pip check` (no conflicts); reran the full pytest suite
-(31 passed, no code changes needed); and re-ran the manual end-to-end smoke
-test (create → redirect → list → stats → delete → SSRF rejection) against a
-live server plus `alembic current` / `alembic check`, to confirm the
-major version jumps (FastAPI 0.115→0.141, Starlette's version scheme
-change to 1.x, Pydantic 2.9→2.13, Alembic 1.13→1.19) introduced no breaking
-behavior in this codebase — no application code changes were required, only
-the dependency pins.
+**Verification:** ran `pip install -r requirements.txt` against the real
+project `.venv` and confirmed zero source builds; ran `pip check` (no
+conflicts); reran the full pytest suite (31 passed at this point — an
+intermediate count, see
+[section 7](#7-follow-up-gap-audit-against-a-re-stated-spec-then-four-fixes)
+— no code changes needed); and ran the manual end-to-end smoke test
+(create → redirect → list → stats → delete → SSRF rejection) against a live
+server, plus `alembic current` / `alembic check`, to confirm the several
+major version jumps involved (FastAPI, Starlette, Pydantic, Alembic)
+introduced no breaking behavior — only the dependency pins changed, no
+application code.
 
 ## 7. Follow-up: gap audit against a re-stated spec, then four fixes
 
@@ -308,3 +301,124 @@ now reports **36 passed, 0 warnings** (previously 36 passed, 1 warning);
 and the live app was restarted and re-checked (`GET /health`) to confirm
 production behavior is unaffected, as expected given neither package is
 ever imported by `app/`.
+
+## 9. Representative prompts used
+
+Sections 1-8 above are the assistant's own summaries of what happened. The
+quotations below reproduce the actual wording of the prompts where
+available. Where a prompt is abridged, that is explicitly stated; no
+reconstructed wording is presented as verbatim.
+
+### Initial planning prompt
+
+The opening request (abridged — the full requirements list is reproduced in
+[section 1](#1-initial-request) and in [README.md](README.md)):
+
+> Build the URL Shortener with Analytics assignment described below.
+>
+> **Stack:** Python, FastAPI, MySQL, SQLAlchemy, Alembic, Pytest.
+>
+> Requirements:
+>
+> [... full endpoint/rules/auth/database/testing requirements list ...]
+>
+> Build this as a production-quality but reasonably simple take-home
+> assignment. Do not add a frontend, user registration, passwords, QR
+> codes, geolocation, or deployment configuration.
+>
+> First create the project structure and implementation plan, then
+> implement the application step by step. Keep the code understandable and
+> explain important design decisions.
+>
+> make a c;ear plaan lets discuss then execute the code
+
+### Implementation prompt
+
+No separate "now implement" prompt exists — the initial prompt above already
+requested both the plan and the step-by-step implementation in one message.
+Implementation began once the two open planning questions (sync vs. async
+DB driver, and how to provision local MySQL) were answered via structured
+multiple-choice responses, not free-text prompts, so there is no additional
+verbatim prompt to show for this step beyond the one quoted above.
+
+### Testing/review prompt
+
+Two separate real prompts drove this phase.
+
+A review request, re-pasting the assignment's rules against the finished
+project (abridged — the full re-pasted spec is not repeated here since it
+duplicates section 1/[README.md](README.md)):
+
+> What does the project misses in the below context:
+>
+> [... the assignment's endpoint list, rules/edge-cases, auth, database,
+> and "must include" sections, pasted in full ...]
+
+Followed, after the assistant reported four gaps, by this fix-and-verify
+instruction, quoted here in full:
+
+> Yes, fix all four issues you identified.
+>
+> 1. Add a catch-all exception handler so unexpected 500 errors use the
+> same `{"error": {"code", "message", "details"}}` response shape.
+> 2. Add a real concurrency test for two simultaneous requests claiming the
+> same custom alias. Keep the existing unique DB constraint and
+> IntegrityError handling.
+> 3. Add a reasonable maximum length validation for `target_url` and make
+> sure the value matches the database/API design.
+> 4. Rewrite the README SSRF section so it clearly explains the security
+> reason for blocking localhost/private IPs, including risks from
+> link-preview/unfurling services.
+>
+> After making the changes:
+>
+> * Run the full test suite.
+> * Fix any failures.
+> * Show me the files changed and a short summary of each change.
+> * Do not make unrelated changes.
+
+A third prompt, after that fix, asked the assistant to judge a leftover
+test warning rather than blindly fixing it — quoted in full:
+
+> The full test suite passes: 36 passed, 1 warning.
+>
+> Check the Starlette/httpx deprecation warning and determine whether it
+> should be fixed for this assignment. If it can be fixed safely without
+> changing application behavior or introducing unnecessary dependencies,
+> fix it and rerun all tests. Otherwise, leave it as-is and explain why.
+
+### Python 3.14 compatibility prompt
+
+Quoted in full:
+
+> Update this project to support Python 3.14.
+>
+> The current `pip install -r requirements.txt` fails while building
+> `pydantic-core==2.23.4` because it is trying to compile from source.
+>
+> Update the dependency versions in `requirements.txt` to
+> Python-3.14-compatible versions while keeping the existing FastAPI +
+> SQLAlchemy + MySQL architecture. Then verify that
+> `pip install -r requirements.txt` works and fix any compatibility issues
+> in the code.
+
+### Corrections/overrides
+
+Being accurate about this project's history: within this conversation, the
+user never rejected or overrode a technical recommendation the assistant
+made — both open design questions in section 2 were answered by picking the
+option the assistant itself had labeled "Recommended." The real corrections
+that happened were:
+
+- **Self-corrections, caught by testing rather than by the user**: the
+  route-shadowing bug, the MySQL naive-datetime bug, the deprecated status
+  constant, and the `TestClient` re-raise behavior (all already documented
+  in [section 4](#4-bugs-found-during-testing-and-how-they-were-fixed) and
+  [section 7](#7-follow-up-gap-audit-against-a-re-stated-spec-then-four-fixes)).
+  These were bugs the assistant introduced and then found and fixed itself
+  through its own testing discipline, not corrections requested by the user.
+- **A user-driven correction to this document itself**: an earlier version
+  of this file's section 2 stated the actual local MySQL root credential in
+  plain text. The user flagged this and asked for it to be removed and
+  replaced with a non-sensitive description — the fix applied in this same
+  section 9 update (see point 1 in the request that produced this section).
