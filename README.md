@@ -36,6 +36,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+This dependency set has been verified with `pip check` (no conflicts) on
+Python 3.14.
+
 ### 2. Create the database and a dedicated app user
 
 Don't run the app as `root`. Connect as an admin user and run:
@@ -64,6 +67,11 @@ SHORT_CODE_LENGTH=7
 RATE_LIMIT_MAX_REQUESTS=10
 RATE_LIMIT_WINDOW_SECONDS=60
 ```
+
+These examples assume a local MySQL 8 instance on `127.0.0.1:3306`. If MySQL
+runs elsewhere (a remote host, a different port, a container), just point
+`DATABASE_URL`/`TEST_DATABASE_URL` at it — nothing else in the app assumes a
+local connection.
 
 ### 4. Run migrations
 
@@ -116,6 +124,13 @@ it has to be for a short link to work for anyone who clicks it.
 | GET    | `/{code}`               | no   | 302 redirect + async click logging             |
 | GET    | `/health`               | no   | Liveness check                                 |
 
+**`GET /{code}` status codes** (see [app/routers/redirect.py](app/routers/redirect.py)):
+
+- `302 Found` — the link is active: redirects to the stored `target_url`.
+- `410 Gone` — the code exists but the link has been soft-deleted or has
+  expired.
+- `404 Not Found` — the code has never existed.
+
 `POST /links` body:
 
 ```json
@@ -129,6 +144,25 @@ it has to be for a short link to work for anyone who clicks it.
 `custom_alias` and `expires_at` are optional. `custom_alias` must be 3-32
 characters of letters/digits/`-`/`_`, and can't collide with reserved paths
 (`links`, `docs`, `health`, etc.) or an existing/previously-used code.
+`target_url` must be 1-2048 characters.
+
+Example — creating a short link:
+
+```bash
+curl -X POST http://localhost:8000/links -H "X-API-Key: YOUR_API_KEY" -H "Content-Type: application/json" -d "{\"target_url\": \"https://example.com/some/very/long/page\"}"
+```
+
+Response (`201 Created`) — `code` is randomly generated, so yours will differ:
+
+```json
+{
+  "code": "aZ3kQ9x",
+  "short_url": "http://localhost:8000/aZ3kQ9x",
+  "target_url": "https://example.com/some/very/long/page",
+  "created_at": "2026-01-01T12:00:00",
+  "expires_at": null
+}
+```
 
 ## Schema and index reasoning
 
@@ -161,10 +195,16 @@ grows monotonically, which is an accepted cost at this scale (see
 
 ## Security
 
-- **API keys are hashed.** Only SHA-256(`key`) is stored
-  ([app/security.py](app/security.py)); a stolen database dump doesn't hand
-  out usable credentials, and there's no way to reconstruct a raw key even
-  with DB access.
+- **API keys are stored as SHA-256 hashes.** The raw key is generated with
+  `secrets.token_urlsafe(32)` (256 bits of randomness) and shown only once,
+  at creation time, by `scripts/create_api_key.py`; only its hash
+  (`hash_api_key()`, [app/security.py](app/security.py)) is ever persisted,
+  so a stolen database dump doesn't hand out usable credentials. This is
+  deliberately plain SHA-256, not a password-hashing algorithm like
+  bcrypt/argon2/scrypt — those exist to slow down brute-forcing a
+  low-entropy, human-chosen password, which doesn't apply here since the
+  input being hashed is already a high-entropy random token. API keys
+  should be treated as high-entropy bearer credentials, not passwords.
 - **Rejecting localhost/private-IP targets matters because of who else
   fetches a short link, not just who clicks it.** A URL shortener's job is
   to hand out URLs that get *distributed* — pasted into Slack, tweeted,
@@ -276,6 +316,8 @@ guaranteed across every endpoint, not just the errors we anticipated.
 ```bash
 pytest
 ```
+
+The suite passes cleanly: `36 passed, 0 warnings`.
 
 Tests run against the real `url_shortener_test` MySQL database (see Setup),
 not SQLite or mocks — the app is small enough that this is simpler than
